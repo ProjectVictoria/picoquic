@@ -4310,6 +4310,11 @@ void picoquic_set_congestion_algorithm(picoquic_cnx_t* cnx, picoquic_congestion_
     }
 }
 
+void picoquic_set_mp_scheduling_algorithm(picoquic_cnx_t* cnx, picoquic_mp_scheduling_enum alg)
+{
+    cnx->mp_scheduling_alg = alg;
+}
+
 void picoquic_subscribe_pacing_rate_updates(picoquic_cnx_t* cnx, uint64_t decrease_threshold, uint64_t increase_threshold)
 {
     cnx->pacing_decrease_threshold = decrease_threshold;

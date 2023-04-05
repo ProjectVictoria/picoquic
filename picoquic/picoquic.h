@@ -1153,6 +1153,17 @@ void picoquic_set_default_congestion_algorithm_by_name(picoquic_quic_t* quic, ch
 
 void picoquic_set_congestion_algorithm(picoquic_cnx_t* cnx, picoquic_congestion_algorithm_t const* algo);
 
+/* Multipath Scheduling Algorithm
+ *
+ * */
+typedef enum {
+    picoquic_mp_scheduling_minrtt = 0,
+    picoquic_mp_scheduling_rr,
+    picoquic_mp_scheduling_mab
+} picoquic_mp_scheduling_enum;
+
+void picoquic_set_mp_scheduling_algorithm(picoquic_cnx_t* cnx, picoquic_mp_scheduling_enum alg);
+
 /* Bandwidth update and congestion control parameters value.
  * Congestion control in picoquic is characterized by three values:
  * - pacing rate, expressed in bytes per second (for example, 10Mbps would be noted as 1250000)

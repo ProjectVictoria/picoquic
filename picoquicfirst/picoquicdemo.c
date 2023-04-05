@@ -827,6 +827,8 @@ int quic_client(const char* ip_address_text, int server_port,
             /* Set PMTUD policy to delayed on the client, leave to default=basic on server */
             picoquic_cnx_set_pmtud_policy(cnx_client, picoquic_pmtud_delayed);
             picoquic_set_default_pmtud_policy(qclient, picoquic_pmtud_delayed);
+            picoquic_set_mp_scheduling_algorithm(cnx_client, picoquic_mp_scheduling_mab);
+            picoquic_set_default_congestion_algorithm_by_name(qclient, "reno");
 
             if (is_siduck) {
                 picoquic_set_callback(cnx_client, siduck_callback, siduck_ctx);

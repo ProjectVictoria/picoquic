@@ -4426,6 +4426,10 @@ static int picoquic_select_next_path_mp(picoquic_cnx_t* cnx, uint64_t current_ti
         cnx->last_path_polled = 0;
     }
 
+    int* candidate_path = (int *)malloc(sizeof(int) * cnx->nb_paths);
+    int nb_candidate_path = 0;
+    memset(candidate_path, 0, sizeof(int) * cnx->nb_paths);
+
     for (i = 0; i < cnx->nb_paths; i++) {
         cnx->path[i]->is_nominal_ack_path = 0;
         if (cnx->path[i]->path_is_demoted) {
@@ -4494,37 +4498,50 @@ static int picoquic_select_next_path_mp(picoquic_cnx_t* cnx, uint64_t current_ti
                     is_min_rtt_pacing_ok = 0;
                 }
                 if (is_polled) {
-                    /* This path is a candidate for min rtt */
-                    if (i_min_rtt < 0 || cnx->path[i]->rtt_min < cnx->path[i_min_rtt]->rtt_min) {
-                        i_min_rtt = i;
-                        is_min_rtt_pacing_ok = 0;
-                    }
-                    cnx->path[i]->polled++;
-                    if (picoquic_is_sending_authorized_by_pacing(cnx, cnx->path[i], current_time, &pacing_time_next)) {
-                        if (cnx->path[i]->last_sent_time < last_sent_pacing) {
-                            last_sent_pacing = cnx->path[i]->last_sent_time;
-                            data_path_pacing = i;
-                            if (i == i_min_rtt) {
-                                is_min_rtt_pacing_ok = 1;
-                            }
+                    if (cnx->mp_scheduling_alg == picoquic_mp_scheduling_minrtt) {
+                        /* This path is a candidate for min rtt */
+                        if (i_min_rtt < 0 || cnx->path[i]->rtt_min < cnx->path[i_min_rtt]->rtt_min) {
+                            i_min_rtt = i;
+                            is_min_rtt_pacing_ok = 0;
                         }
-                        if (cnx->path[i]->bytes_in_transit < cnx->path[i]->cwin) {
-                            if (cnx->path[i]->last_sent_time < last_sent_cwin) {
-                                last_sent_cwin = cnx->path[i]->last_sent_time;
-                                data_path_cwin = i;
+                        cnx->path[i]->polled++;
+                        if (picoquic_is_sending_authorized_by_pacing(cnx, cnx->path[i], current_time, &pacing_time_next)) {
+                            if (cnx->path[i]->last_sent_time < last_sent_pacing) {
+                                last_sent_pacing = cnx->path[i]->last_sent_time;
+                                data_path_pacing = i;
+                                if (i == i_min_rtt) {
+                                    is_min_rtt_pacing_ok = 1;
+                                }
+                            }
+                            if (cnx->path[i]->bytes_in_transit < cnx->path[i]->cwin) {
+                                if (cnx->path[i]->last_sent_time < last_sent_cwin) {
+                                    last_sent_cwin = cnx->path[i]->last_sent_time;
+                                    data_path_cwin = i;
+                                }
+                            }
+                            else {
+                                cnx->path[i]->congested++;
                             }
                         }
                         else {
-                            cnx->path[i]->congested++;
+                            cnx->path[i]->paced++;
                         }
                     }
-                    else {
-                        cnx->path[i]->paced++;
-                    }
+                    candidate_path[nb_candidate_path++] = i;
                 }
             }
         }
     }
+
+    printf("\nnb_candidate_path=%d\n", nb_candidate_path);
+    for (int j = 0; j < nb_candidate_path; j++) {
+        uint64_t pacing_rate = cnx->path[candidate_path[j]]->pacing_rate;
+        uint64_t rtt = cnx->path[candidate_path[j]]->one_way_return_avg;
+        uint64_t bw = cnx->path[candidate_path[j]]->bandwidth_estimate;
+
+        printf("path=%d, pacing_rate=%lu, rtt=%lu, bandwidth=%lu\n", candidate_path[j], pacing_rate, rtt, bw);
+    }
+    printf("\n\n");
 
     /* Ensure that at most one path is marked as nominal ack path */
     for (i += 1; i < cnx->nb_paths; i++) {
@@ -4546,6 +4563,26 @@ static int picoquic_select_next_path_mp(picoquic_cnx_t* cnx, uint64_t current_ti
     }
     else if (data_path_pacing >= 0) {
         path_id = data_path_pacing;
+    }
+    else if (cnx->mp_scheduling_alg == picoquic_mp_scheduling_mab) {
+        if (nb_candidate_path >= 2) {
+            int max_bw_index = -1;
+            uint64_t max_bw = -1;
+            for (int j = 0; j < nb_candidate_path; j++) {
+                if (cnx->path[candidate_path[j]]->bandwidth_estimate > max_bw) {
+                    max_bw = cnx->path[candidate_path[j]]->bandwidth_estimate;
+                    max_bw_index = j;
+                }
+            }
+            if (max_bw_index >= 0) {
+                path_id = max_bw_index;
+            } else {
+                path_id = 0;
+            }
+        } else {
+            path_id = 0;
+        }
+        printf("selected path_id=%d\n", path_id);
     }
     else {
         uint64_t path_wake_time = pacing_time_next;

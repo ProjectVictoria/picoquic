@@ -1313,6 +1313,9 @@ typedef struct st_picoquic_cnx_t {
     uint64_t pacing_increase_threshold;
     uint64_t pacing_decrease_threshold;
 
+    /* Multipath scheduling algorithm */
+    picoquic_mp_scheduling_enum mp_scheduling_alg;
+
     /* Data accounting for limiting amplification attacks */
     uint64_t initial_data_received;
     uint64_t initial_data_sent;
