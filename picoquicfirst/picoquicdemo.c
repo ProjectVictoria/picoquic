@@ -73,8 +73,6 @@ static const char* token_store_filename = "demo_token_store.bin";
 #include "wt_baton.h"
 #include "democlient.h"
 #include "demoserver.h"
-#include "siduck.h"
-#include "quicperf.h"
 #include "picoquic_unified_log.h"
 #include "picoquic_logger.h"
 #include "picoquic_binlog.h"
@@ -82,12 +80,6 @@ static const char* token_store_filename = "demo_token_store.bin";
 #include "picoquic_config.h"
 #include "picoquic_lb.h"
 
-/*
- * SIDUCK datagram demo call back.
- */
-int siduck_callback(picoquic_cnx_t* cnx,
-    uint64_t stream_id, uint8_t* bytes, size_t length,
-    picoquic_call_back_event_t fin_or_event, void* callback_ctx, void* v_stream_ctx);
 
 void print_address(FILE* F_log, struct sockaddr* address, char* label, picoquic_connection_id_t cnx_id)
 {
@@ -390,7 +382,6 @@ static const char * test_scenario_default = "0:index.html;4:test.html;8:/1234567
 typedef struct st_client_loop_cb_t {
     picoquic_cnx_t* cnx_client;
     picoquic_demo_callback_ctx_t* demo_callback_ctx;
-    siduck_ctx_t* siduck_ctx;
     int notified_ready;
     int established;
     int migration_to_preferred_started;
@@ -401,8 +392,6 @@ typedef struct st_client_loop_cb_t {
     int nb_packets_before_key_update;
     int key_update_done;
     int zero_rtt_available;
-    int is_siduck;
-    int is_quicperf;
     int socket_buffer_size;
     int multipath_probe_done;
     char const* saved_alpn;
@@ -496,7 +485,7 @@ int client_loop_cb(picoquic_quic_t* quic, picoquic_packet_loop_cb_enum cb_mode,
             break;
         case picoquic_packet_loop_after_receive:
             /* Post receive callback */
-            if ((!cb_ctx->is_siduck && !cb_ctx->is_quicperf && cb_ctx->demo_callback_ctx->connection_closed) ||
+            if ((cb_ctx->demo_callback_ctx->connection_closed) ||
                 cb_ctx->cnx_client->cnx_state == picoquic_state_disconnected) {
                 fprintf(stdout, "The connection is closed!\n");
                 ret = PICOQUIC_NO_ERROR_TERMINATE_PACKET_LOOP;
@@ -642,7 +631,7 @@ int client_loop_cb(picoquic_quic_t* quic, picoquic_packet_loop_cb_enum cb_mode,
                     }
                 }
 
-                if (!cb_ctx->is_siduck && !cb_ctx->is_quicperf && cb_ctx->demo_callback_ctx->nb_open_streams == 0) {
+                if (cb_ctx->demo_callback_ctx->nb_open_streams == 0) {
                     fprintf(stdout, "All done, Closing the connection.\n");
                     picoquic_log_app_message(cb_ctx->cnx_client, "%s", "All done, Closing the connection.");
 
@@ -668,7 +657,7 @@ int client_loop_cb(picoquic_quic_t* quic, picoquic_packet_loop_cb_enum cb_mode,
                     cb_ctx->cnx_client->is_hcid_verified);
                 cb_ctx->established = 1;
 
-                if (!cb_ctx->zero_rtt_available && !cb_ctx->is_siduck && !cb_ctx->is_quicperf) {
+                if (!cb_ctx->zero_rtt_available) {
                     /* Start the download scenario */
                     ret = picoquic_demo_client_start_streams(cb_ctx->cnx_client, cb_ctx->demo_callback_ctx, PICOQUIC_DEMO_STREAM_ID_INITIAL);
                 }
@@ -698,10 +687,6 @@ int quic_client(const char* ip_address_text, int server_port,
     int is_name = 0;
     size_t client_sc_nb = 0;
     picoquic_demo_stream_desc_t * client_sc = NULL;
-    int is_siduck = 0;
-    siduck_ctx_t* siduck_ctx = NULL;
-    int is_quicperf = 0;
-    quicperf_ctx_t* quicperf_ctx = NULL;
     client_loop_cb_t loop_cb;
     const char* sni = config->sni;
 
@@ -768,45 +753,23 @@ int quic_client(const char* ip_address_text, int server_port,
     }
 
     if (ret == 0) {
-        if (config->alpn != NULL && (strcmp(config->alpn, "siduck") == 0 || strcmp(config->alpn, "siduck-00") == 0)) {
-            /* Set a siduck client */
-            is_siduck = 1;
-            siduck_ctx = siduck_create_ctx(stdout);
-            if (siduck_ctx == NULL) {
-                fprintf(stdout, "Could not get ready to quack\n");
-                return -1;
-            }
-            fprintf(stdout, "Getting ready to quack\n");
+        if (config->no_disk) {
+            fprintf(stdout, "Files not saved to disk (-D, no_disk)\n");
         }
-        else if (config->alpn != NULL && strcmp(config->alpn, QUICPERF_ALPN) == 0) {
-            /* Set a QUICPERF client */
-            is_quicperf = 1;
-            quicperf_ctx = quicperf_create_ctx(client_scenario_text);
-            if (quicperf_ctx == NULL) {
-                fprintf(stdout, "Could not get ready to run QUICPERF\n");
-                return -1;
-            }
-            fprintf(stdout, "Getting ready to run QUICPERF\n");
+
+        if (client_scenario_text == NULL) {
+            client_scenario_text = test_scenario_default;
+        }
+
+        fprintf(stdout, "Testing scenario: <%s>\n", client_scenario_text);
+        ret = demo_client_parse_scenario_desc(client_scenario_text, &client_sc_nb, &client_sc);
+        if (ret != 0) {
+            fprintf(stdout, "Cannot parse the specified scenario.\n");
+            return -1;
         }
         else {
-            if (config->no_disk) {
-                fprintf(stdout, "Files not saved to disk (-D, no_disk)\n");
-            }
-
-            if (client_scenario_text == NULL) {
-                client_scenario_text = test_scenario_default;
-            }
-
-            fprintf(stdout, "Testing scenario: <%s>\n", client_scenario_text);
-            ret = demo_client_parse_scenario_desc(client_scenario_text, &client_sc_nb, &client_sc);
-            if (ret != 0) {
-                fprintf(stdout, "Cannot parse the specified scenario.\n");
-                return -1;
-            }
-            else {
-                ret = picoquic_demo_client_initialize_context(&callback_ctx, client_sc, client_sc_nb, config->alpn, config->no_disk, 0);
-                callback_ctx.out_dir = config->out_dir;
-            }
+            ret = picoquic_demo_client_initialize_context(&callback_ctx, client_sc, client_sc_nb, config->alpn, config->no_disk, 0);
+            callback_ctx.out_dir = config->out_dir;
         }
     }
     /* Check that if we are using H3 the SNI is not NULL */
@@ -829,24 +792,15 @@ int quic_client(const char* ip_address_text, int server_port,
             picoquic_cnx_set_pmtud_policy(cnx_client, picoquic_pmtud_delayed);
             picoquic_set_default_pmtud_policy(qclient, picoquic_pmtud_delayed);
 
-            if (is_siduck) {
-                picoquic_set_callback(cnx_client, siduck_callback, siduck_ctx);
-                cnx_client->local_parameters.max_datagram_frame_size = 128;
-            }
-            else if (is_quicperf) {
-                picoquic_set_callback(cnx_client, quicperf_callback, quicperf_ctx);
-            }
-            else {
-                picoquic_set_callback(cnx_client, picoquic_demo_client_callback, &callback_ctx);
+            picoquic_set_callback(cnx_client, picoquic_demo_client_callback, &callback_ctx);
 
-                /* Requires TP grease, for interop tests */
-                cnx_client->grease_transport_parameters = 1;
-                cnx_client->local_parameters.enable_time_stamp = 3;
-                cnx_client->local_parameters.do_grease_quic_bit = 1;
+            /* Requires TP grease, for interop tests */
+            cnx_client->grease_transport_parameters = 1;
+            cnx_client->local_parameters.enable_time_stamp = 3;
+            cnx_client->local_parameters.do_grease_quic_bit = 1;
 
-                if (callback_ctx.tp != NULL) {
-                    picoquic_set_transport_parameters(cnx_client, callback_ctx.tp);
-                }
+            if (callback_ctx.tp != NULL) {
+                picoquic_set_transport_parameters(cnx_client, callback_ctx.tp);
             }
 
             if (config->large_client_hello) {
@@ -873,7 +827,7 @@ int quic_client(const char* ip_address_text, int server_port,
                     (int)cnx_client->remote_parameters.initial_max_stream_id_bidir);
             }
 
-            if (ret == 0 && !is_siduck && !is_quicperf) {
+            if (ret == 0) {
                 if (picoquic_is_0rtt_available(cnx_client) && (config->proposed_version & 0x0a0a0a0a) != 0x0a0a0a0a) {
                     loop_cb.zero_rtt_available = 1;
 
@@ -899,15 +853,8 @@ int quic_client(const char* ip_address_text, int server_port,
         loop_cb.cnx_client = cnx_client;
         loop_cb.force_migration = force_migration;
         loop_cb.nb_packets_before_key_update = nb_packets_before_key_update;
-        loop_cb.is_siduck = is_siduck;
-        loop_cb.is_quicperf = is_quicperf;
         loop_cb.socket_buffer_size = config->socket_buffer_size;
-        if (is_siduck) {
-            loop_cb.siduck_ctx = siduck_ctx;
-        }
-        else if (!is_quicperf) {
-            loop_cb.demo_callback_ctx = &callback_ctx;
-        }
+        loop_cb.demo_callback_ctx = &callback_ctx;
 
 #ifdef _WINDOWS
         ret = picoquic_packet_loop_win(qclient, 0, loop_cb.server_address.ss_family, 0, 
@@ -1034,35 +981,20 @@ int quic_client(const char* ip_address_text, int server_port,
             double duration_usec = (double)(close_time - start_time);
 
             if (duration_usec > 0) {
-                if (is_quicperf) {
-                    double duration_sec = duration_usec / 1000000.0;
-                    printf("Connection_duration_sec: %f\n", duration_sec);
-                    printf("Nb_transactions: %" PRIu64"\n", quicperf_ctx->nb_streams);
-                    printf("Upload_bytes: %" PRIu64"\n", quicperf_ctx->data_sent);
-                    printf("Download_bytes: %" PRIu64"\n", quicperf_ctx->data_received);
-                    printf("TPS: %f\n", ((double)quicperf_ctx->nb_streams) / duration_sec);
-                    printf("Upload_Mbps: %f\n", ((double)quicperf_ctx->data_sent) * 8.0 / duration_usec);
-                    printf("Download_Mbps: %f\n", ((double)quicperf_ctx->data_received) * 8.0 / duration_usec);
-
-                    picoquic_log_app_message(cnx_client, "Received %" PRIu64 " bytes in %f seconds, %f Mbps.",
-                        picoquic_get_data_received(cnx_client), duration_usec, ((double)quicperf_ctx->data_received) * 8.0 / duration_usec);
-                }
-                else {
-                    double receive_rate_mbps = 8.0 * ((double)picoquic_get_data_received(cnx_client)) / duration_usec;
-                    double send_rate_mbps = 8.0* ((double)picoquic_get_data_sent(cnx_client)) / duration_usec;
-                    fprintf(stdout, "Received %" PRIu64 " bytes in %f seconds, %f Mbps.\n",
+                double receive_rate_mbps = 8.0 * ((double)picoquic_get_data_received(cnx_client)) / duration_usec;
+                double send_rate_mbps = 8.0* ((double)picoquic_get_data_sent(cnx_client)) / duration_usec;
+                fprintf(stdout, "Received %" PRIu64 " bytes in %f seconds, %f Mbps.\n",
                         picoquic_get_data_received(cnx_client),
                         duration_usec / 1000000.0, receive_rate_mbps);
-                    picoquic_log_app_message(cnx_client, "Received %" PRIu64 " bytes in %f seconds, %f Mbps.",
-                        picoquic_get_data_received(cnx_client),
-                        duration_usec / 1000000.0, receive_rate_mbps);
-                    fprintf(stdout, "Sent %" PRIu64 " bytes in %f seconds, %f Mbps.\n",
+                picoquic_log_app_message(cnx_client, "Received %" PRIu64 " bytes in %f seconds, %f Mbps.",
+                                         picoquic_get_data_received(cnx_client),
+                                         duration_usec / 1000000.0, receive_rate_mbps);
+                fprintf(stdout, "Sent %" PRIu64 " bytes in %f seconds, %f Mbps.\n",
                         picoquic_get_data_sent(cnx_client),
                         duration_usec / 1000000.0, send_rate_mbps);
-                    picoquic_log_app_message(cnx_client, "Sent %" PRIu64 " bytes in %f seconds, %f Mbps.",
-                        picoquic_get_data_sent(cnx_client),
-                        duration_usec / 1000000.0, send_rate_mbps);
-                }
+                picoquic_log_app_message(cnx_client, "Sent %" PRIu64 " bytes in %f seconds, %f Mbps.",
+                                         picoquic_get_data_sent(cnx_client),
+                                         duration_usec / 1000000.0, send_rate_mbps);
                 /* Print those for debugging the effects of ack frequency and flow control */
                 printf("max_data_local: %" PRIu64 "\n", cnx_client->maxdata_local);
                 printf("max_stream_data_local: %" PRIu64 "\n", cnx_client->max_stream_data_local);
@@ -1102,18 +1034,7 @@ int quic_client(const char* ip_address_text, int server_port,
     }
 
     /* Clean up */
-    if (is_quicperf) {
-        if (quicperf_ctx != NULL) {
-            quicperf_delete_ctx(quicperf_ctx);
-        }
-    } else if (is_siduck) {
-        if (siduck_ctx != NULL) {
-            free(siduck_ctx);
-        }
-    }
-    else {
-        picoquic_demo_client_delete_context(&callback_ctx);
-    }
+    picoquic_demo_client_delete_context(&callback_ctx);
 
     if (loop_cb.saved_alpn != NULL) {
         free((void *)loop_cb.saved_alpn);
