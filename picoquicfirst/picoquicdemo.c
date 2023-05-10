@@ -386,11 +386,7 @@ typedef struct st_client_loop_cb_t {
     int established;
     int migration_to_preferred_started;
     int migration_to_preferred_finished;
-    int migration_started;
     int address_updated;
-    int force_migration;
-    int nb_packets_before_key_update;
-    int key_update_done;
     int zero_rtt_available;
     int socket_buffer_size;
     int multipath_probe_done;
@@ -400,8 +396,6 @@ typedef struct st_client_loop_cb_t {
     struct sockaddr_storage client_alt_address[PICOQUIC_NB_PATH_TARGET];
     int client_alt_if[PICOQUIC_NB_PATH_TARGET];
     int nb_alt_paths;
-    picoquic_connection_id_t server_cid_before_migration;
-    picoquic_connection_id_t client_cid_before_migration;
 } client_loop_cb_t;
 
 
@@ -562,75 +556,6 @@ int client_loop_cb(picoquic_quic_t* quic, picoquic_packet_loop_cb_enum cb_mode,
                     }
                 }
 
-                /* Execute the migration trials
-                 * The actual change of sockets is delegated to the packet loop function,
-                 * so it can be integrated with other aspects of socket management.
-                 * If a new socket is needed, two special error codes will be used.
-                 */
-                if (cb_ctx->force_migration && cb_ctx->migration_started == 0 && cb_ctx->address_updated &&
-                    picoquic_get_cnx_state(cb_ctx->cnx_client) == picoquic_state_ready &&
-                    (cb_ctx->cnx_client->cnxid_stash_first != NULL || cb_ctx->force_migration == 1) &&
-                    (!cb_ctx->cnx_client->remote_parameters.prefered_address.is_defined ||
-                        cb_ctx->migration_to_preferred_finished)) {
-                    int mig_ret = 0;
-                    cb_ctx->migration_started = 1;
-                    cb_ctx->server_cid_before_migration = cb_ctx->cnx_client->path[0]->p_remote_cnxid->cnx_id;
-                    if (cb_ctx->cnx_client->path[0]->p_local_cnxid != NULL) {
-                        cb_ctx->client_cid_before_migration = cb_ctx->cnx_client->path[0]->p_local_cnxid->cnx_id;
-                    }
-                    else {
-                        /* Special case of forced migration after preferred address migration */
-                        memset(&cb_ctx->client_cid_before_migration, 0, sizeof(picoquic_connection_id_t));
-                    }
-                    switch (cb_ctx->force_migration) {
-                    case 1:
-                        fprintf(stdout, "Switch to new port. Will test NAT rebinding support.\n");
-                        ret = PICOQUIC_NO_ERROR_SIMULATE_NAT;
-                        break;
-                    case 2:
-                        mig_ret = picoquic_renew_connection_id(cb_ctx->cnx_client, 0);
-                        if (mig_ret != 0) {
-                            if (mig_ret == PICOQUIC_ERROR_MIGRATION_DISABLED) {
-                                fprintf(stdout, "Migration disabled, cannot test CNXID renewal.\n");
-                            }
-                            else {
-                                fprintf(stdout, "Renew CNXID failed, error: %x.\n", mig_ret);
-                            }
-                            cb_ctx->migration_started = -1;
-                        }
-                        else {
-                            fprintf(stdout, "Switching to new CNXID.\n");
-                        }
-                        break;
-                    case 3:
-                        fprintf(stdout, "Will test migration to new port.\n");
-                        ret = PICOQUIC_NO_ERROR_SIMULATE_MIGRATION;
-                        break;
-                    default:
-                        cb_ctx->migration_started = -1;
-                        fprintf(stdout, "Invalid migration code: %d!\n", cb_ctx->force_migration);
-                        break;
-                    }
-                }
-
-                /* Track key update */
-                if (cb_ctx->nb_packets_before_key_update > 0 &&
-                    !cb_ctx->key_update_done &&
-                    picoquic_get_cnx_state(cb_ctx->cnx_client) == picoquic_state_ready &&
-                    cb_ctx->cnx_client->nb_packets_received > (uint64_t)cb_ctx->nb_packets_before_key_update) {
-                    int key_rot_ret = picoquic_start_key_rotation(cb_ctx->cnx_client);
-                    if (key_rot_ret != 0) {
-                        fprintf(stdout, "Will not test key rotation.\n");
-                        picoquic_log_app_message(cb_ctx->cnx_client, "%s", "Will not test key rotation.");
-                        cb_ctx->key_update_done = -1;
-                    }
-                    else {
-                        fprintf(stdout, "Key rotation started.\n");
-                        picoquic_log_app_message(cb_ctx->cnx_client, "%s", "Key rotation started.");
-                        cb_ctx->key_update_done = 1;
-                    }
-                }
-
                 if (cb_ctx->demo_callback_ctx->nb_open_streams == 0) {
                     fprintf(stdout, "All done, Closing the connection.\n");
                     picoquic_log_app_message(cb_ctx->cnx_client, "%s", "All done, Closing the connection.");
@@ -675,8 +600,8 @@ int client_loop_cb(picoquic_quic_t* quic, picoquic_packet_loop_cb_enum cb_mode,
 
 /* Quic Client */
 int quic_client(const char* ip_address_text, int server_port, 
-    picoquic_quic_config_t * config, int force_migration,
-    int nb_packets_before_key_update, char const * client_scenario_text)
+    picoquic_quic_config_t * config,
+    char const * client_scenario_text)
 {
     /* Start: start the QUIC process with cert and key files */
     int ret = 0;
@@ -851,8 +776,6 @@ int quic_client(const char* ip_address_text, int server_port,
         }
 
         loop_cb.cnx_client = cnx_client;
-        loop_cb.force_migration = force_migration;
-        loop_cb.nb_packets_before_key_update = nb_packets_before_key_update;
         loop_cb.socket_buffer_size = config->socket_buffer_size;
         loop_cb.demo_callback_ctx = &callback_ctx;
 
@@ -924,54 +847,6 @@ int quic_client(const char* ip_address_text, int server_port,
             else {
                 fprintf(stdout, "Could not negotiate version 0x%" PRIx32 ", used version 0x%" PRIu32 ".\n", 
                     config->desired_version, v);
-            }
-        }
-
-        if (loop_cb.force_migration){
-            if (!loop_cb.migration_started) {
-                fprintf(stdout, "Could not start testing migration.\n");
-                picoquic_log_app_message(cnx_client, "%s", "Could not start testing migration.");
-                loop_cb.migration_started = -1;
-            }
-            else {
-                int source_addr_cmp = picoquic_compare_addr(
-                    (struct sockaddr*) & cnx_client->path[0]->local_addr,
-                    (struct sockaddr*) & loop_cb.client_address);
-                int dest_cid_cmp = picoquic_compare_connection_id(
-                    &cnx_client->path[0]->p_remote_cnxid->cnx_id,
-                    &loop_cb.server_cid_before_migration);
-                fprintf(stdout, "After migration:\n");
-                fprintf(stdout, "- Default source address %s\n", (source_addr_cmp) ? "changed" : "did not change");
-                if (cnx_client->path[0]->p_local_cnxid == NULL) {
-                    fprintf(stdout, "- Local CID is NULL!\n");
-                }
-                else {
-                    int source_cid_cmp = picoquic_compare_connection_id(
-                        &cnx_client->path[0]->p_local_cnxid->cnx_id,
-                        &loop_cb.client_cid_before_migration);
-                    fprintf(stdout, "- Local CID %s\n", (source_cid_cmp) ? "changed" : "did not change");
-                }
-                fprintf(stdout, "- Remode CID %s\n", (dest_cid_cmp) ? "changed" : "did not change");
-            }
-        }
-
-        if (loop_cb.nb_packets_before_key_update > 0) {
-            if (loop_cb.key_update_done == 0) {
-                fprintf(stdout, "Did not start key rotation.\n");
-            }
-            else if (loop_cb.key_update_done == -1) {
-                fprintf(stdout, "Error when starting key rotation.\n");
-            }
-            else {
-                uint64_t crypto_rotation_sequence;
-                if (cnx_client->is_multipath_enabled) {
-                    crypto_rotation_sequence = cnx_client->path[0]->p_local_cnxid->ack_ctx.crypto_rotation_sequence;
-                }
-                else {
-                    crypto_rotation_sequence = cnx_client->ack_ctx[picoquic_packet_context_application].crypto_rotation_sequence;
-                }
-                fprintf(stdout, "Crypto rotation sequence: %" PRIu64 ", phase ENC: %d, phase DEC: %d\n",
-                    crypto_rotation_sequence, cnx_client->key_phase_enc, cnx_client->key_phase_dec);
             }
         }
 
@@ -1187,8 +1062,7 @@ int main(int argc, char** argv)
     else {
         /* Run as client */
         printf("Starting Picoquic (v%s) connection to server = %s, port = %d\n", PICOQUIC_VERSION, server_name, server_port);
-        ret = quic_client(server_name, server_port, &config,
-            force_migration, nb_packets_before_update, client_scenario);
+        ret = quic_client(server_name, server_port, &config, client_scenario);
 
         printf("Client exit with code = %d\n", ret);
     }
